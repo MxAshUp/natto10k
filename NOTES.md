@@ -6,7 +6,7 @@ IDLE
 IN MODE
  HOLD RED BUTTON -> Go to idle
 
-
+Is Buzzer fixed with mult removed?
 
 
  Tones

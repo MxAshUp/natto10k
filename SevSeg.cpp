@@ -192,7 +192,7 @@ void SevSeg::setNumber(int32_t numToShow, int8_t decPlaces, bool hex) { //int32_
 }
 
 // Put period whereever
-void SevSeg::setPeriod(int8_t position, bool on = true) {
+void SevSeg::setPeriod(int8_t position, bool on) {
   if(position >= 0 && position < MAXNUMDIGITS) {
     if(on) {
       digitCodes[position] |= digitCodeMap[PERIOD_IDX];

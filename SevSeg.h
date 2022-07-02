@@ -37,7 +37,7 @@ public:
   void setBrightness(int16_t brightnessIn); // A number from 0..100
 
   void setNumber(int32_t numToShow, int8_t decPlaces=-1, bool hex=0);
-  void setPeriod(int8_t position, bool on = true);
+  void setPeriod(int8_t position, bool on=true);
   void togglePeriod(int8_t position);
   void setNumberF(float numToShow, int8_t decPlaces=-1, bool hex=0);
 

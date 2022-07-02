@@ -1,5 +1,16 @@
 #include "Encoder.h"
 #include "SevSeg.h"
+#include <SPI.h>
+#include "Adafruit_MAX31855.h"
+
+#define THERM_TOP_SPI_CS A4
+#define THERM_BOT_SPI_CS A5
+
+// initialize the Thermocouple
+Adafruit_MAX31855 thermTop(THERM_TOP_SPI_CS);
+Adafruit_MAX31855 thermBot(THERM_BOT_SPI_CS);
+
+#define PIN_RESET 12
 
 #define PIN_TX 0
 #define PIN_RX 1
@@ -24,42 +35,44 @@
 #define PIN_REL_FAN 5
 #define PIN_REL_LIGHT 7
 
-
-#define TIME(t) (t)
-#define CLOCK_MULT 10
-#define FREQ(f) (f)
-
 #define DISPLAY_WELCOME_MESSAGE "HELO"
 #define MAX_DISP_NUM 9999
 
-#define RED_BUTTON_HOLD_TIME TIME(3000)
+#define CANCEL_HOLD_TIME 3000
 
-#define ENCODER_DEBOUNCE_DELAY_MS TIME(10)    // the debounce time; increase if the output flickers
+#define ENCODER_DEBOUNCE_DELAY_MS 10    // the debounce time; increase if the output flickers
 #define ENCODER_ROTATE_MULT 4    // the debounce time; increase if the output flickers
-unsigned long lastDebounceRotaryTime = TIME(0);  // the last time the output pin was toggled
-unsigned long lastDebounceTime = TIME(0);  // the last time the output pin was toggled
+unsigned long lastDebounceRotaryTime = 0;  // the last time the output pin was toggled
+unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
 unsigned long buttonStartPress = 0;
 int lastButtonState = HIGH;
 
 unsigned long redbuttonStartPress = 0;
+int redlastButtonState = HIGH;
+
+// Temp stuff
+float destTempTop = 0;
+float destTempBot = 0;
+float currentTempTop = 0;
+float currentTempBot = 0;
 
 
 Encoder myEnc(PIN_ENCODER_A, PIN_ENCODER_B);
 
 enum mode {
-  BOOTUP,
+  NONE,
   TIMER,
   RANDOM,
   TONE,
-  METRONOME,
   COUNTER,
   TEST,
+  TEMP,
   UNKNOWN
 };
 
-enum state {
-  READY,
-  SET_MODE,
+enum programState {
+  CHOOSE_MODE,
+  MODE_ACTIVE,
 };
 
 enum inputState {
@@ -71,14 +84,15 @@ enum inputState {
   ROTATE_DOWN,
   HOLD_ROTATE_UP,
   HOLD_ROTATE_DOWN,
+  HOLDING_CANCEL,
 };
 
 inputState currentInputState = IDLE;
 
 int modeSelector = COUNTER;
 #define TOTAL_MODES 12
-mode currentMode = BOOTUP;
-state currentState = SET_MODE;
+mode currentMode = NONE;
+programState currentState = MODE_ACTIVE; // This is so we start on NONE (bootup)
 
 /** MODE STATE VARIABLES **/
 // TODO: Move these into class VARIABLES
@@ -93,21 +107,12 @@ bool randomizingState = false;
 // TIMER
 bool timerActive = false;
 unsigned long timerDuration = 120;
-unsigned long timerDurationms = TIME(timerDuration * 1000);
+unsigned long timerDurationms = timerDuration * 1000;
 unsigned long timerStartTime = 0;
 
 // TONE
 bool playTone = false;
 unsigned int toneFreq = 440;
-
-// METRONOME
-#define METRO_TONE_LENGTH TIME(10)
-unsigned int metroBpm = 60;
-unsigned int metroBpms = TIME(60000 / metroBpm);
-unsigned int metroMeterMs = metroBpms * 4;
-unsigned int metroOffset = 0;
-bool metroActive = false;
-
 
 #include "SevSeg.h"
 SevSeg sevseg; //Instantiate a seven segment controller object
@@ -118,12 +123,9 @@ uint32_t Color(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void setup() {
-  bool updateWithDelays = false; // Default 'false' is Recommended
-  bool leadingZeros = false; // Use 'true' if you'd like to keep the leading zeros
-  bool disableDecPoint = false; // Use 'true' if your decimal point doesn't exist or isn't connected
-
-
-  pinMode(PIN_REDBUTTON, INPUT);
+  digitalWrite(PIN_RESET, HIGH);
+  pinMode(PIN_RESET, OUTPUT);
+  pinMode(PIN_REDBUTTON, INPUT_PULLUP);
   pinMode(PIN_BUZZER, OUTPUT);
   pinMode(PIN_NEOSEG, OUTPUT);
   pinMode(PIN_REL_HEAT_TOP, OUTPUT);
@@ -134,80 +136,56 @@ void setup() {
   pinMode(PIN_ENCODER_B, INPUT_PULLUP);
   pinMode(PIN_ENCBUTTON, INPUT);
 
-  tone(PIN_BUZZER, FREQ(880), TIME(20));
-
-  sevseg.begin(4, PIN_NEOSEG, updateWithDelays, leadingZeros, disableDecPoint);
-  sevseg.setBrightness(5);
+  sevseg.begin(4, PIN_NEOSEG, false, false, true);
+  sevseg.setBrightness(4);
   sevseg.blank();  
-  sevseg.setBkgColor(0);
   sevseg.setBkgColor(Color(0,0,0));
   sevseg.setColor(Color(255,28,0));
 
-}
-
-// TODO - maybe ints can just be passed as enum to changeMode()?
-void changeModeByIndex(mode newMode) {
-  switch (newMode)
-  {
-  case TIMER:
-    changeMode(TIMER);
-    break;
-
-  case RANDOM:
-    changeMode(RANDOM);
-    randomizingState = true;
-    break;
-
-  case METRONOME:
-    changeMode(METRONOME);
-    metroActive = false;
-    break;
-
-  case COUNTER:
-    changeMode(COUNTER);
-    break;
-
-  case TONE:
-    changeMode(TONE);
-    playTone = false;
-    break;
-
-  case TEST:
-    changeMode(TEST);
-    break;
-
-  default:
-    changeMode(UNKNOWN);
-    break;
+  if (!thermTop.begin() || !thermBot.begin()) {
+    sevseg.setColor(Color(255,0,0));
+    sevseg.setChars("Err ");
+    sevseg.refreshDisplay();
+    while (1) {
+      delay(10);
+    }
   }
 }
 
-// TODO - combine with changeModeByIndex()
 void changeMode(mode newMode) {
+  switch (newMode)
+  {
+    case RANDOM:
+      randomizingState = true;
+      break;
+    case TONE:
+      playTone = false;
+      break;
+    case TEMP:
+      selector = 0;
+      break;
+  }
+
   currentMode = newMode;
-  tone(PIN_BUZZER, FREQ(220), TIME(10));
-  currentState = READY;
+  tone(PIN_BUZZER, 220, 10);
+  currentState = MODE_ACTIVE;
   sevseg.setColor(Color(16,255,0));
   sevseg.blank();
 }
 
 void exitMode() {
-  currentMode = BOOTUP;
-  tone(PIN_BUZZER, FREQ(220), TIME(10));
-  currentState = SET_MODE;
+  // Turn everything off
+  digitalWrite(PIN_REL_HEAT_BOT, LOW);
+  digitalWrite(PIN_REL_HEAT_TOP, LOW);
+  digitalWrite(PIN_REL_LIGHT, LOW);
+  digitalWrite(PIN_REL_FAN, LOW);
+  currentMode = NONE;
+  tone(PIN_BUZZER, 220, 10);
+  currentState = CHOOSE_MODE;
   sevseg.setColor(Color(255,28,0));
   sevseg.blank();
 }
 
-
-  // BOOTUP,
-  // TIMER,
-  // RANDOM,
-  // TONE,
-  // METRONOME,
-  // COUNTER,
-  // TEST,
-  // UNKNOWN
 void indicateMode(mode selectedMode) {
 
   switch (selectedMode)
@@ -221,10 +199,11 @@ void indicateMode(mode selectedMode) {
     case TONE:
       sevseg.setChars("TONE");
       break;
-    case METRONOME:
-      sevseg.setChars("METR");
     case TEST:
       sevseg.setChars("TEST");
+      break;
+    case TEMP:
+      sevseg.setChars("TEMP");
       break;
     
   default:
@@ -235,24 +214,14 @@ void indicateMode(mode selectedMode) {
 }
 
 void loop() {
-  // Check cancel button first
-  if(currentState == READY) {
-    if(digitalRead(PIN_REDBUTTON) == HIGH) {
-      buttonStartPress = 0;
-    } else if(buttonStartPress == 0) {
-      buttonStartPress = millis();
-    }
+  // Temp reading stuff
+  currentTempTop = thermTop.readCelsius();
+  currentTempBot = thermBot.readCelsius();
 
-    if(buttonStartPress > 0 && millis() - buttonStartPress > RED_BUTTON_HOLD_TIME) {
-      exitMode();
-    }
-  }
-
+  // UI stuff
   inputState lastInputState = currentInputState;
   currentInputState = IDLE;
   int rotateDirection = 0;
-
-  // UI stuff
   long encoderPos = myEnc.read();
 
   if (abs(encoderPos) >= ENCODER_ROTATE_MULT) {
@@ -283,13 +252,26 @@ void loop() {
     }
   }
 
-  /********** DETERMINE INPUT STATE *****************/
-  if(buttonState == BUTTON_RELEASED && rotateDirection == 1) {
-    currentInputState = ROTATE_UP;
+  int redbuttonChange = 0;
+  int redbuttonState = digitalRead(PIN_REDBUTTON);
+  if(redbuttonState != redlastButtonState) {
+    redlastButtonState = redbuttonState;
+    if(redbuttonState == BUTTON_PRESSED) {
+      redbuttonStartPress = millis();
+      redbuttonChange = BUTTON_JUST_PRESSED;
+    } else if (redbuttonState == BUTTON_RELEASED) {
+      redbuttonChange = BUTTON_JUST_RELEASED;
+    }
   }
 
-  if(buttonState == BUTTON_RELEASED && rotateDirection == -1) {
-    currentInputState = ROTATE_DOWN;
+  /********** DETERMINE INPUT STATE *****************/
+  if(buttonState == BUTTON_RELEASED) {
+    if(rotateDirection == 1) {
+      currentInputState = ROTATE_UP;
+    }
+    if(rotateDirection == -1) {
+      currentInputState = ROTATE_DOWN;
+    }
   }
 
   // Check for press+turn
@@ -307,33 +289,37 @@ void loop() {
     currentInputState = TAP_RELEASE;
   }
 
+  if(redbuttonState == BUTTON_PRESSED) {
+    currentInputState = HOLDING_CANCEL;
+  }
+
   /************* DONE WITH INPUT **************/
 
 
 
   /************** HANDLE MODES/STATES ****************/
 
-  if(currentState == SET_MODE) {
+  if(currentState == CHOOSE_MODE) {
     if(currentInputState == ROTATE_UP) {
       modeSelector ++;
       if(modeSelector >= 12) modeSelector = 0;
-      indicateMode(modeSelector);
+      indicateMode(static_cast<mode>(modeSelector));
     } else if(currentInputState == ROTATE_DOWN) {
       modeSelector --;
       if(modeSelector < 0) modeSelector = 11;
-      indicateMode(modeSelector);
+      indicateMode(static_cast<mode>(modeSelector));
     } else if(currentInputState == TAP_RELEASE) {
       // Selection finished
-      changeModeByIndex(modeSelector);
+      changeMode(static_cast<mode>(modeSelector));
     }
-  } else if(currentState == READY) {
+  } else if(currentState == MODE_ACTIVE) {
 
-    if(currentMode == BOOTUP) {
-      /**** BOOTUP ***/
+    if(currentMode == NONE) {
+      /**** NONE ***/
 
       sevseg.setChars(DISPLAY_WELCOME_MESSAGE);
-      if(millis() > TIME(2000)) {
-        changeModeByIndex(modeSelector);
+      if(millis() > 2000) {
+        exitMode();
       }
     } else if(currentMode == RANDOM) {
       if(currentInputState == TAP_RELEASE) {
@@ -361,26 +347,49 @@ void loop() {
       case 0:
         sevseg.setChars("o   ");
         changePin = PIN_REL_HEAT_TOP;
+        sevseg.setColor(Color(255,0,0));
         break;
       case 1:
         sevseg.setChars(" o  ");
         changePin = PIN_REL_HEAT_BOT;
+        sevseg.setColor(Color(255,0,0));
         break;
       case 2:
         sevseg.setChars("  o ");
-        changePin = PIN_REL_FAN;
+        changePin = PIN_REL_LIGHT;
+        sevseg.setColor(Color(128,128,0));
         break;
       case 3:
         sevseg.setChars("   o");
-        changePin = PIN_REL_LIGHT;
+        changePin = PIN_REL_FAN;
+        sevseg.setColor(Color(128,128,0));
         break;
       }
 
       if(currentInputState == TAP_RELEASE) {
-        sevseg.blank();
-        sevseg.refreshDisplay();
-        delay(100);
         digitalWrite(changePin, !digitalRead(changePin));
+      }
+
+
+    } else if(currentMode == TEMP) {
+      /**** SHOW TEMPs ***/
+
+      if(currentInputState == ROTATE_UP) {
+        selector++;
+        if(selector > 1) selector = 1;
+      } else if(currentInputState == ROTATE_DOWN) {
+        selector--;
+        if(selector < 0) selector = 0;
+      }
+
+      if(selector == 0) {
+        // TOP
+        sevseg.setColor(Color(0,0,128));
+        sevseg.setNumber(round(currentTempTop));
+      } else {
+        // BOTTOM
+        sevseg.setColor(Color(0,64,128));
+        sevseg.setNumber(round(currentTempBot));
       }
 
 
@@ -400,18 +409,18 @@ void loop() {
         toneFreq++;
         if(toneFreq > MAX_DISP_NUM) toneFreq = MAX_DISP_NUM;
         if(playTone) {
-          tone(PIN_BUZZER, toneFreq * CLOCK_MULT);
+          tone(PIN_BUZZER, toneFreq);
         }
       } else if(currentInputState == ROTATE_DOWN) {
         toneFreq--;
         if(toneFreq < 1) toneFreq = 1;
         if(playTone) {
-          tone(PIN_BUZZER, toneFreq * CLOCK_MULT);
+          tone(PIN_BUZZER, toneFreq);
         }
       } else if(currentInputState == TAP_RELEASE) {
         playTone = !playTone;
         if(playTone) {
-          tone(PIN_BUZZER, toneFreq * CLOCK_MULT);
+          tone(PIN_BUZZER, toneFreq);
         } else {
           noTone(PIN_BUZZER);
         }
@@ -429,64 +438,6 @@ void loop() {
         sevseg.setPeriod(3, false);
       }
 
-    } else if(currentMode == METRONOME) {
-      /**** METRONOME ***/
-
-      if(currentInputState == ROTATE_UP) {
-        metroBpm++;
-        if(metroBpm > MAX_DISP_NUM) metroBpm = MAX_DISP_NUM;
-        metroBpms = TIME(60000/metroBpm);
-        metroMeterMs = metroBpms * 4;
-        if(metroActive) {
-          metroOffset = millis()- ((millis() - metroOffset) % metroMeterMs);
-        }
-      } else if(currentInputState == ROTATE_DOWN) {
-        metroBpm--;
-        if(metroBpm < 1) metroBpm = 1;
-        metroBpms = TIME(60000/metroBpm);
-        metroMeterMs = metroBpms * 4;
-        if(metroActive) {
-          metroOffset = millis()- ((millis() - metroOffset) % metroMeterMs);
-        }
-      } else if(currentInputState == TAP_RELEASE) {
-        metroActive = !metroActive;
-        if(metroActive) {
-          metroOffset = millis();
-        } else {
-          sevseg.setPeriod(0, false);
-          sevseg.setPeriod(1, false);
-          sevseg.setPeriod(2, false);
-          sevseg.setPeriod(3, false);
-        }
-      }
-
-      sevseg.setNumber(metroBpm);
-
-      if(metroActive) {
-
-        #ifdef SLEEP_AFTER_MS
-        // Keep from sleeping while timer is going
-        // @TODO add timer feature for watchdog/wake up when timer done
-        lastActive = millis();
-        #endif
-        unsigned int barPos = (millis() - metroOffset) % metroMeterMs;
-        unsigned int beatPos = barPos % metroBpms;
-        unsigned int beatNum = floor(barPos / metroBpms);
-
-        if(beatPos < METRO_TONE_LENGTH) {
-          if(beatNum == 0) {
-            tone(PIN_BUZZER, FREQ(880), METRO_TONE_LENGTH);
-          } else {
-            tone(PIN_BUZZER, FREQ(440), METRO_TONE_LENGTH);
-          }
-        }
-
-        if(beatPos < metroBpms / 2) {
-          sevseg.setPeriod(beatNum, true);
-        }
-      }
-
-
     } else if(currentMode == TIMER) {
       /**** TIMER ***/
 
@@ -501,15 +452,15 @@ void loop() {
       } else if(currentInputState == TAP_RELEASE) {
         timerActive = !timerActive;
         if(timerActive) {
-          tone(PIN_BUZZER, FREQ(440), 10);
+          tone(PIN_BUZZER, 440, 10);
           timerStartTime = millis();
-          timerDurationms = TIME(timerDuration * 1000);
+          timerDurationms = timerDuration * 1000;
         }
       }
       if(timerActive) {
         if(((unsigned long)(millis() - timerStartTime)) >= timerDurationms) {
           timerActive = false;
-          tone(PIN_BUZZER, FREQ(2000), TIME(2000));
+          tone(PIN_BUZZER, 2000, 2000);
         } else {
 
           #ifdef SLEEP_AFTER_MS
@@ -518,7 +469,7 @@ void loop() {
           lastActive = millis();
           #endif
 
-          int timeLeft = ceil((timerDurationms - (unsigned long)(millis() - timerStartTime)) * CLOCK_MULT / 1000.0);
+          int timeLeft = ceil((timerDurationms - (unsigned long)(millis() - timerStartTime)));
           sevseg.setNumber(timeLeft);
         }
       } else {
@@ -530,6 +481,20 @@ void loop() {
       /**** UNKNOWN ***/
 
       sevseg.setChars("----");
+    }
+  }
+
+  // This is last priority
+  // This allows for the above mode actions to carry out
+  // But we can still override the display here 
+  // @TODO - maybe wire up reset pin and trigger that instead
+  if(currentInputState == HOLDING_CANCEL) {
+    sevseg.setChars("---");
+    if(millis() - redbuttonStartPress > CANCEL_HOLD_TIME) {
+      exitMode();
+      tone(PIN_BUZZER, 800, 1000);
+      delay(500);
+      digitalWrite(PIN_RESET, LOW);
     }
   }
 
