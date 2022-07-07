@@ -141,7 +141,7 @@ void setup() {
   pinMode(PIN_BUZZER, OUTPUT);
   pinMode(PIN_NEOSEG, OUTPUT);
   pinMode(PIN_REL_HEAT_TOP, OUTPUT);
-  pinMode(PIN_REL_HEAT_BOT, OUTPUT); 
+  pinMode(PIN_REL_HEAT_BOT, OUTPUT);
   pinMode(PIN_REL_FAN, OUTPUT);
   pinMode(PIN_REL_LIGHT, OUTPUT);
   pinMode(PIN_ENCODER_A, INPUT_PULLUP);
@@ -150,7 +150,7 @@ void setup() {
 
   sevseg.begin(4, PIN_NEOSEG, false, false, true);
   sevseg.setBrightness(128);
-  sevseg.blank();  
+  sevseg.blank();
   sevseg.setBkgColor(Color(0,0,0));
   sevseg.setColor(Color(255,28,0));
 
@@ -165,9 +165,9 @@ void setup() {
 }
 
 void changeMode(mode newMode) {
-  
+
   sevseg.setColor(Color(16,255,0));
-  
+
   switch (newMode)
   {
     case RANDOM:
@@ -228,7 +228,7 @@ void indicateMode(mode selectedMode) {
     case BAKE:
       sevseg.setChars("BAKE");
       break;
-    
+
   default:
     sevseg.setNumber(selectedMode);
     break;
@@ -239,7 +239,7 @@ void indicateMode(mode selectedMode) {
 void loop() {
 
   cycleCount++;
-  
+
   // Temp reading stuff
   currentTempTop = thermTop.readCelsius();
   currentTempBot = thermBot.readCelsius();
@@ -443,7 +443,7 @@ void loop() {
           if(bakeTemp < 0) selector = 0;
         }
         sevseg.setColor(Color(255,255,255));
-        
+
         sevseg.setNumber(bakeTemp);
         if(currentInputState == TAP_RELEASE) {
           baking = true;
@@ -458,7 +458,7 @@ void loop() {
               digitalWrite(PIN_REL_HEAT_BOT, HIGH);
               digitalWrite(PIN_REL_HEAT_TOP, HIGH);
               lastTempThrottleTime = millis();
-            } 
+            }
           } else {
             if(digitalRead(PIN_REL_HEAT_BOT) == HIGH) {
               digitalWrite(PIN_REL_HEAT_BOT, LOW);
@@ -473,7 +473,7 @@ void loop() {
           bakeTemp++;
           if(bakeTemp > 200) bakeTemp = 200;
           sevseg.setColor(Color(255,255,255));
-          sevseg.setNumber(bakeTemp);          
+          sevseg.setNumber(bakeTemp);
         } else if(currentInputState == HOLD_ROTATE_DOWN) {
           bakeTemp--;
           if(bakeTemp < 0) selector = 0;
@@ -489,11 +489,11 @@ void loop() {
           } else {
             sevseg.setColor(Color(255,64,0));
             sevseg.setNumber(round(currentTempTop));
-          } 
+          }
         }
       }
-      
-      
+
+
     } else if(currentMode == TONE) {
       /**** TONE ***/
 
@@ -578,7 +578,7 @@ void loop() {
 
   // This is last priority
   // This allows for the above mode actions to carry out
-  // But we can still override the display here 
+  // But we can still override the display here
   // @TODO - maybe wire up reset pin and trigger that instead
   if(currentInputState == HOLDING_CANCEL) {
     sevseg.setChars("----");
