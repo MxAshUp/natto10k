@@ -38,7 +38,7 @@ Adafruit_MAX31855 thermBot(THERM_BOT_SPI_CS);
 #define DISPLAY_WELCOME_MESSAGE "HELO"
 #define MAX_DISP_NUM 9999
 
-#define CANCEL_HOLD_TIME 3000
+#define CANCEL_HOLD_TIME 2000
 
 #define ENCODER_DEBOUNCE_DELAY_MS 10    // the debounce time; increase if the output flickers
 #define ENCODER_ROTATE_MULT 4    // the debounce time; increase if the output flickers
@@ -46,6 +46,12 @@ unsigned long lastDebounceRotaryTime = 0;  // the last time the output pin was t
 unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
 unsigned long buttonStartPress = 0;
 int lastButtonState = HIGH;
+
+#define TEMP_THROTTLE_DELAY_MS 1000    // Don't switch temp on/off quicker than once per second
+unsigned long lastTempThrottleTime = 0;  // the last time the temp relay was switched
+
+unsigned int lastUIAction = 0;
+unsigned int cycleCount = 0;
 
 unsigned long redbuttonStartPress = 0;
 int redlastButtonState = HIGH;
@@ -66,6 +72,8 @@ enum mode {
   TONE,
   COUNTER,
   TEST,
+  TOAST,
+  BAKE,
   TEMP,
   UNKNOWN
 };
@@ -114,6 +122,10 @@ unsigned long timerStartTime = 0;
 bool playTone = false;
 unsigned int toneFreq = 440;
 
+// BAKE
+unsigned int bakeTemp = 40;
+bool baking = false;
+
 #include "SevSeg.h"
 SevSeg sevseg; //Instantiate a seven segment controller object
 
@@ -137,7 +149,7 @@ void setup() {
   pinMode(PIN_ENCBUTTON, INPUT);
 
   sevseg.begin(4, PIN_NEOSEG, false, false, true);
-  sevseg.setBrightness(4);
+  sevseg.setBrightness(128);
   sevseg.blank();  
   sevseg.setBkgColor(Color(0,0,0));
   sevseg.setColor(Color(255,28,0));
@@ -153,6 +165,9 @@ void setup() {
 }
 
 void changeMode(mode newMode) {
+  
+  sevseg.setColor(Color(16,255,0));
+  
   switch (newMode)
   {
     case RANDOM:
@@ -164,12 +179,14 @@ void changeMode(mode newMode) {
     case TEMP:
       selector = 0;
       break;
+    case BAKE:
+      baking = false;
+      break;
   }
 
   currentMode = newMode;
   tone(PIN_BUZZER, 220, 10);
   currentState = MODE_ACTIVE;
-  sevseg.setColor(Color(16,255,0));
   sevseg.blank();
 }
 
@@ -203,7 +220,13 @@ void indicateMode(mode selectedMode) {
       sevseg.setChars("TEST");
       break;
     case TEMP:
-      sevseg.setChars("TEMP");
+      sevseg.setChars("TEnP");
+      break;
+    case TOAST:
+      sevseg.setChars("TOST");
+      break;
+    case BAKE:
+      sevseg.setChars("BAKE");
       break;
     
   default:
@@ -214,6 +237,9 @@ void indicateMode(mode selectedMode) {
 }
 
 void loop() {
+
+  cycleCount++;
+  
   // Temp reading stuff
   currentTempTop = thermTop.readCelsius();
   currentTempBot = thermBot.readCelsius();
@@ -293,6 +319,10 @@ void loop() {
     currentInputState = HOLDING_CANCEL;
   }
 
+  if(currentInputState != IDLE) {
+    lastUIAction = millis();
+  }
+
   /************* DONE WITH INPUT **************/
 
 
@@ -325,7 +355,7 @@ void loop() {
       if(currentInputState == TAP_RELEASE) {
         randomizingState = !randomizingState;
       }
-      if(randomizingState) {
+      if(randomizingState && cycleCount % 50 == 0) {
         sevseg.setNumber(random(1000,MAX_DISP_NUM));
       }
 
@@ -384,11 +414,11 @@ void loop() {
 
       if(selector == 0) {
         // TOP
-        sevseg.setColor(Color(0,0,128));
+        sevseg.setColor(Color(0,128,255));
         sevseg.setNumber(round(currentTempTop));
       } else {
         // BOTTOM
-        sevseg.setColor(Color(0,64,128));
+        sevseg.setColor(Color(128,5,128));
         sevseg.setNumber(round(currentTempBot));
       }
 
@@ -402,6 +432,68 @@ void loop() {
       sevseg.setNumber(counter);
 
 
+    } else if(currentMode == BAKE) {
+      if(!baking) {
+        // Set temp
+        if(currentInputState == ROTATE_UP) {
+          bakeTemp++;
+          if(bakeTemp > 200) bakeTemp = 200;
+        } else if(currentInputState == ROTATE_DOWN) {
+          bakeTemp--;
+          if(bakeTemp < 0) selector = 0;
+        }
+        sevseg.setColor(Color(255,255,255));
+        
+        sevseg.setNumber(bakeTemp);
+        if(currentInputState == TAP_RELEASE) {
+          baking = true;
+          digitalWrite(PIN_REL_FAN, HIGH);
+          digitalWrite(PIN_REL_LIGHT, HIGH);
+        }
+      } else {
+        // Crude throttle for making sure on/off doesn't flicker
+        if(millis() - lastTempThrottleTime > TEMP_THROTTLE_DELAY_MS) {
+          if(currentTempTop < bakeTemp) {
+            if(digitalRead(PIN_REL_HEAT_BOT) == LOW) {
+              digitalWrite(PIN_REL_HEAT_BOT, HIGH);
+              digitalWrite(PIN_REL_HEAT_TOP, HIGH);
+              lastTempThrottleTime = millis();
+            } 
+          } else {
+            if(digitalRead(PIN_REL_HEAT_BOT) == HIGH) {
+              digitalWrite(PIN_REL_HEAT_BOT, LOW);
+              digitalWrite(PIN_REL_HEAT_TOP, LOW);
+              lastTempThrottleTime = millis();
+            }
+          }
+        }
+
+        // Set temp
+        if(currentInputState == HOLD_ROTATE_UP) {
+          bakeTemp++;
+          if(bakeTemp > 200) bakeTemp = 200;
+          sevseg.setColor(Color(255,255,255));
+          sevseg.setNumber(bakeTemp);          
+        } else if(currentInputState == HOLD_ROTATE_DOWN) {
+          bakeTemp--;
+          if(bakeTemp < 0) selector = 0;
+          sevseg.setColor(Color(255,255,255));
+          sevseg.setNumber(bakeTemp);
+        } else if(currentInputState == HOLD) {
+          sevseg.setColor(Color(255,255,255));
+          sevseg.setNumber(bakeTemp);
+        } else {
+          if((millis() - lastUIAction) % 4000 > 2000) {
+          sevseg.setColor(Color(255,255,255));
+            sevseg.setNumber(bakeTemp);
+          } else {
+            sevseg.setColor(Color(255,64,0));
+            sevseg.setNumber(round(currentTempTop));
+          } 
+        }
+      }
+      
+      
     } else if(currentMode == TONE) {
       /**** TONE ***/
 
@@ -489,7 +581,7 @@ void loop() {
   // But we can still override the display here 
   // @TODO - maybe wire up reset pin and trigger that instead
   if(currentInputState == HOLDING_CANCEL) {
-    sevseg.setChars("---");
+    sevseg.setChars("----");
     if(millis() - redbuttonStartPress > CANCEL_HOLD_TIME) {
       exitMode();
       tone(PIN_BUZZER, 800, 1000);
