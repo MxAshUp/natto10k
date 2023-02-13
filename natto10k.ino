@@ -30,6 +30,8 @@ Adafruit_MAX31855 thermBot(THERM_BOT_SPI_CS);
 
 #define PIN_NEOSEG 10
 
+#define LED_BRIGHTNESS 160
+
 #define PIN_REL_HEAT_TOP A0
 #define PIN_REL_HEAT_BOT A1
 #define PIN_REL_FAN 5
@@ -47,7 +49,7 @@ unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
 unsigned long buttonStartPress = 0;
 int lastButtonState = HIGH;
 
-#define TEMP_THROTTLE_DELAY_MS 1000    // Don't switch temp on/off quicker than once per second
+#define TEMP_THROTTLE_DELAY_MS 2000    // Don't switch temp on/off quicker than once per five seconds
 unsigned long lastTempThrottleTime = 0;  // the last time the temp relay was switched
 
 unsigned int lastUIAction = 0;
@@ -126,6 +128,10 @@ unsigned int toneFreq = 440;
 unsigned int bakeTemp = 40;
 bool baking = false;
 
+// BAKE
+#define MAX_TOAST_TEMP 180
+#define MAX_TOAST_TIME 600
+
 #include "SevSeg.h"
 SevSeg sevseg; //Instantiate a seven segment controller object
 
@@ -149,7 +155,7 @@ void setup() {
   pinMode(PIN_ENCBUTTON, INPUT);
 
   sevseg.begin(4, PIN_NEOSEG, false, false, true);
-  sevseg.setBrightness(128);
+  sevseg.setBrightness(LED_BRIGHTNESS);
   sevseg.blank();
   sevseg.setBkgColor(Color(0,0,0));
   sevseg.setColor(Color(255,28,0));
@@ -181,6 +187,9 @@ void changeMode(mode newMode) {
       break;
     case BAKE:
       baking = false;
+      break;
+    case TOAST:
+      timerDuration = 300;
       break;
   }
 
@@ -448,7 +457,7 @@ void loop() {
         if(currentInputState == TAP_RELEASE) {
           baking = true;
           digitalWrite(PIN_REL_FAN, HIGH);
-          digitalWrite(PIN_REL_LIGHT, HIGH);
+          //digitalWrite(PIN_REL_LIGHT, HIGH);
         }
       } else {
         // Crude throttle for making sure on/off doesn't flicker
@@ -493,6 +502,66 @@ void loop() {
         }
       }
 
+
+    } else if(currentMode == TOAST) {
+
+      if(!timerActive) {
+        if(currentInputState == ROTATE_UP) {
+          if(timerDuration < MAX_TOAST_TIME) {
+            timerDuration+=60;
+          }
+        } else if(currentInputState == ROTATE_DOWN) {
+          if(timerDuration > 1) {
+            timerDuration-=60;
+          }
+        } else if(currentInputState == TAP_RELEASE) {
+          timerActive = true;
+          digitalWrite(PIN_REL_LIGHT, HIGH);
+          digitalWrite(PIN_REL_FAN, HIGH);
+          tone(PIN_BUZZER, 440, 10);
+          timerStartTime = millis();
+          timerDurationms = timerDuration * 1000;
+        }
+
+        sevseg.setColor(Color(255,255,255));
+        sevseg.setNumber(timerDuration);
+
+      } else {
+
+        if(millis() - lastTempThrottleTime > TEMP_THROTTLE_DELAY_MS) {
+          // Toast is basically bake at 180
+          if(currentTempTop < MAX_TOAST_TEMP) {
+            if(digitalRead(PIN_REL_HEAT_BOT) == LOW) {
+              digitalWrite(PIN_REL_HEAT_BOT, HIGH);
+              digitalWrite(PIN_REL_HEAT_TOP, HIGH);
+              lastTempThrottleTime = millis();
+            }
+          } else {
+            if(digitalRead(PIN_REL_HEAT_BOT) == HIGH) {
+              digitalWrite(PIN_REL_HEAT_BOT, LOW);
+              digitalWrite(PIN_REL_HEAT_TOP, LOW);
+              lastTempThrottleTime = millis();
+            }
+          }
+        }
+
+        if(((unsigned long)(millis() - timerStartTime)) >= timerDurationms) {
+          exitMode();
+        } else {
+
+          #ifdef SLEEP_AFTER_MS
+          // Keep from sleeping while timer is going
+          // @TODO add timer feature for watchdog/wake up when timer done
+          lastActive = millis();
+          #endif
+
+          int timeLeft = ceil((timerDurationms - (unsigned long)(millis() - timerStartTime))/1000);
+
+          sevseg.setColor(Color(255,128,0));
+          sevseg.setNumber(timeLeft);
+        }
+
+      }
 
     } else if(currentMode == TONE) {
       /**** TONE ***/
